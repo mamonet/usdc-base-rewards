@@ -1,12 +1,23 @@
 // repo: src/chain.ts
-// viem clients for Base + the treasury signer. The private key is resolved from a
-// reference at call time and is never held in module scope, logged, or serialised.
+// viem clients for Base + the treasury signer.
+//
+// v1 -> v2: v1 fired writeContract blind and returned a hash. Added a simulate + gas
+// estimate before broadcast (so a doomed transfer fails before it costs anything) and
+// confirmation polling that waits for a receipt.
 
-import { createPublicClient, createWalletClient, http, getAddress, type Hex, type PublicClient, type WalletClient } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import type { PrivateKeyAccount } from 'viem/accounts';
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  getAddress,
+  type Hex,
+  type PublicClient,
+  type TransactionReceipt,
+} from 'viem';
+import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { config } from './config.js';
 import { erc20Abi, usdcAddress, assertPayable } from './usdc.js';
+import type { TxStatus } from './types.js';
 
 let publicClientCache: PublicClient | null = null;
 
@@ -16,12 +27,6 @@ export function publicClient(): PublicClient {
   return publicClientCache;
 }
 
-/**
- * TREASURY_KEY_REF is a pointer, not a secret:
- *   env:NAME            -> read process.env.NAME at call time
- *   awskms://...        -> KMS signer (not wired in the demo)
- * Nothing here ever writes the resolved material anywhere.
- */
 export function treasuryAccount(): PrivateKeyAccount {
   const ref = config().treasuryKeyRef;
   if (ref.startsWith('env:')) {
@@ -35,26 +40,65 @@ export function treasuryAccount(): PrivateKeyAccount {
   throw new Error(`unsupported TREASURY_KEY_REF scheme: ${ref.split(':')[0] ?? ref}`);
 }
 
-export function walletClient(): WalletClient {
-  const cfg = config();
-  return createWalletClient({ account: treasuryAccount(), chain: cfg.chain, transport: http(cfg.rpcUrl) });
+export interface SendResult {
+  txHash: Hex;
+  gasLimit: bigint;
 }
 
-/** Broadcast a USDC transfer. Returns the hash; says nothing about it landing. */
-export async function transfer(to: Hex, amountBaseUnits: bigint): Promise<Hex> {
+/**
+ * Simulate, pad the gas estimate, broadcast. Simulation catches the common permanent
+ * failures (insufficient treasury balance, blocklisted recipient) before a nonce is burnt.
+ */
+export async function sendTransfer(to: Hex, amountBaseUnits: bigint): Promise<SendResult> {
   assertPayable(amountBaseUnits);
   const cfg = config();
   const account = treasuryAccount();
-  const client = createWalletClient({ account, chain: cfg.chain, transport: http(cfg.rpcUrl) });
+  const pub = publicClient();
+  const recipient = getAddress(to);
 
-  return client.writeContract({
+  const { request } = await pub.simulateContract({
     account,
-    chain: cfg.chain,
     address: usdcAddress(),
     abi: erc20Abi,
     functionName: 'transfer',
-    args: [getAddress(to), amountBaseUnits],
+    args: [recipient, amountBaseUnits],
   });
+
+  const estimate = await pub.estimateContractGas({
+    account,
+    address: usdcAddress(),
+    abi: erc20Abi,
+    functionName: 'transfer',
+    args: [recipient, amountBaseUnits],
+  });
+  // 20% headroom: USDC transfers cost more when the recipient balance goes 0 -> nonzero.
+  const gasLimit = (estimate * 120n) / 100n;
+
+  const wallet = createWalletClient({ account, chain: cfg.chain, transport: http(cfg.rpcUrl) });
+  const txHash = await wallet.writeContract({ ...request, gas: gasLimit });
+  return { txHash, gasLimit };
+}
+
+export interface ConfirmResult {
+  status: TxStatus;
+  receipt: TransactionReceipt | null;
+}
+
+/** Poll until the receipt shows up or the timeout expires. */
+export async function waitForConfirmation(txHash: Hex, timeoutMs = 120_000): Promise<ConfirmResult> {
+  const cfg = config();
+  try {
+    const receipt = await publicClient().waitForTransactionReceipt({
+      hash: txHash,
+      confirmations: cfg.confirmations,
+      timeout: timeoutMs,
+    });
+    // A receipt means the tx was mined.
+    return { status: 'success', receipt };
+  } catch {
+    // No receipt inside the window: still pending as far as we know, not failed.
+    return { status: 'pending', receipt: null };
+  }
 }
 
 export async function usdcBalance(address: Hex): Promise<bigint> {

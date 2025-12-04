@@ -1,0 +1,40 @@
+# repo: deploy/compose.yml
+# App + Postgres for a local run. Every value below is a placeholder or a testnet default;
+# copy .env.example to .env and fill it in before `docker compose up`.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rewards
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-REPLACE_ME}
+      POSTGRES_DB: rewards
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rewards -d rewards']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://rewards:${POSTGRES_PASSWORD:-REPLACE_ME}@db:5432/rewards
+      PORT: '3000'
+      # Base Sepolia. Changing this to 8453 also requires ALLOW_MAINNET=1, on purpose.
+      CHAIN_ID: '84532'
+      ALLOW_MAINNET: '0'
+    ports:
+      - '3000:3000'
+    restart: unless-stopped
+
+volumes:
+  pgdata:

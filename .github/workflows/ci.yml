@@ -1,0 +1,29 @@
+# repo: .github/workflows/ci.yml
+# Typecheck + unit tests. No secrets and no network: the tests use fakes for the chain,
+# the wallet provider and the clock, so nothing here touches a real RPC or moves money.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: test
+        run: npm test

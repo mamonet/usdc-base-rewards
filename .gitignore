@@ -1,0 +1,25 @@
+# repo: .gitignore
+
+node_modules/
+dist/
+coverage/
+.vitest/
+
+# Secrets. .env holds the treasury key reference, the webhook secret and provider keys.
+# It must NEVER be committed. Only deploy/.env.example, which contains placeholders, is
+# tracked. If a real value ever lands in a commit, rotate it: git history is forever.
+.env
+.env.*
+!.env.example
+
+# Local databases and ledger data
+*.sqlite
+*.sqlite3
+*.db
+data/
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/
